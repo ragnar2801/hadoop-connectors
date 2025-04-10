@@ -43,6 +43,8 @@ import com.google.api.client.util.DateTime;
 import com.google.api.services.storage.Storage;
 import com.google.api.services.storage.model.StorageObject;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadOptions.Fadvise;
+import com.google.cloud.hadoop.util.ApiErrorExtractor;
+import com.google.cloud.hadoop.util.ClientRequestHelper;
 import com.google.cloud.hadoop.util.RetryHttpInitializer;
 import com.google.cloud.hadoop.util.RetryHttpInitializerOptions;
 import com.google.cloud.hadoop.util.testing.MockHttpTransportHelper.ErrorResponses;
@@ -746,5 +748,80 @@ public class GoogleCloudStorageReadChannelTest {
 
   private static GoogleCloudStorageReadOptions.Builder newLazyReadOptionsBuilder() {
     return GoogleCloudStorageReadOptions.builder().setFastFailOnNotFoundEnabled(false);
+  }
+
+  @Test
+  public void testSmallFileCaching() throws Exception {
+    // Create a small file (2MB)
+    byte[] testData = new byte[2 * 1024 * 1024];
+    for (int i = 0; i < testData.length; i++) {
+      testData[i] = (byte) (i % 256);
+    }
+
+    TrackingHttpRequestInitializer requestInitializer =
+        new TrackingHttpRequestInitializer(new RetryHttpInitializer(null, null));
+    MockHttpTransport transport =
+        mockTransport(
+            jsonDataResponse(GoogleCloudStorageTest.newStorageObject(BUCKET_NAME, OBJECT_NAME)),
+            dataResponse(testData));
+
+    Storage storage = new Storage(transport, GsonFactory.getDefaultInstance(), requestInitializer);
+
+    GoogleCloudStorageReadOptions options =
+        GoogleCloudStorageReadOptions.builder()
+            .setSmallFileCacheEnabled(true)
+            .setSmallFileCacheMaxSize(3 * 1024 * 1024) // 3MB max cache size
+            .build();
+
+    GoogleCloudStorageReadChannel readChannel = new GoogleCloudStorageReadChannel(
+        storage,
+        new StorageResourceId(BUCKET_NAME, OBJECT_NAME),
+        ApiErrorExtractor.INSTANCE,
+        new ClientRequestHelper<>(),
+        options);
+
+    // First read should trigger caching of the entire file
+    byte[] readBuffer = new byte[1024];
+    readChannel.position(0);
+    readChannel.read(ByteBuffer.wrap(readBuffer));
+
+    // Verify that the entire file was fetched
+    assertThat(requestInitializer.getAllRequestStrings())
+        .containsExactly(
+            getRequestString(BUCKET_NAME, OBJECT_NAME),
+            getMediaRequestString(BUCKET_NAME, OBJECT_NAME))
+        .inOrder();
+
+    // Reset the request tracker
+    requestInitializer.reset();
+
+    // Read from a different position should not trigger another request
+    byte[] expectedData = new byte[1024];
+    System.arraycopy(testData, 1024 * 1024, expectedData, 0, 1024);
+
+    readChannel.position(1024 * 1024); // 1MB offset
+    readChannel.read(ByteBuffer.wrap(readBuffer));
+
+    // Verify no additional requests were made
+    assertThat(requestInitializer.getAllRequestStrings()).isEmpty();
+
+    // Verify the data is correct
+    assertThat(readBuffer).isEqualTo(expectedData);
+
+    // Read another section
+    byte[] expectedData2 = new byte[1024];
+    System.arraycopy(testData, 1024 * 1024 + 512, expectedData2, 0, 1024);
+
+    readChannel.position(1024 * 1024 + 512); // 1MB + 512 bytes offset
+    readChannel.read(ByteBuffer.wrap(readBuffer));
+
+    // Verify no additional requests were made
+    assertThat(requestInitializer.getAllRequestStrings()).isEmpty();
+
+    // Verify the data is correct
+    assertThat(readBuffer).isEqualTo(expectedData2);
+
+    // Close the channel
+    readChannel.close();
   }
 }

@@ -67,6 +67,12 @@ class GoogleCloudStorageClientReadChannel implements SeekableByteChannel {
   private boolean gzipEncoded = false;
   private boolean open = true;
 
+  // Cached content for small files
+  private byte[] cachedContent;
+
+  // Whether the entire file has been cached
+  private boolean isFileCached = false;
+
   // Current position in this channel, it could be different from contentChannelCurrentPosition if
   // position(long) method calls were made without calls to read(ByteBuffer) method.
   private long currentPosition = 0;
@@ -98,6 +104,69 @@ class GoogleCloudStorageClientReadChannel implements SeekableByteChannel {
           "Cannot read GZIP encoded files - content encoding support is disabled.");
     }
     objectSize = gzipEncoded ? Long.MAX_VALUE : sizeFromMetadata;
+
+    // Check if we should cache the entire file
+    if (!gzipEncoded && readOptions.isSmallFileCacheEnabled() && objectSize <= readOptions.getSmallFileCacheMaxSize()) {
+      logger.atFiner().log(
+          "Caching entire file content for small file: '%s' (size: %d bytes)",
+          resourceId, objectSize);
+      cacheEntireFile();
+    }
+  }
+
+  /**
+   * Caches the entire file content in memory for small files.
+   * This avoids multiple network requests for small files.
+   */
+  private void cacheEntireFile() {
+    checkState(objectSize > 0, "objectSize should be greater than 0 for '%s'", resourceId);
+    checkState(objectSize <= readOptions.getSmallFileCacheMaxSize(),
+        "File size (%s) should be <= max cache size (%s) for '%s'",
+        objectSize, readOptions.getSmallFileCacheMaxSize(), resourceId);
+
+    try {
+      // Create a BlobId for the object
+      BlobId blobId = BlobId.of(resourceId.getBucketName(), resourceId.getObjectName());
+
+      // Get a ReadChannel for the entire object
+      ReadChannel readChannel = storage.reader(blobId, generateReadOptions(blobId));
+
+      // Read the entire content into memory
+      int fileSize = toIntExact(objectSize);
+      cachedContent = new byte[fileSize];
+      ByteBuffer buffer = ByteBuffer.wrap(cachedContent);
+
+      int totalBytesRead = 0;
+      int bytesRead;
+      while (buffer.hasRemaining() && (bytesRead = readChannel.read(buffer)) > 0) {
+        totalBytesRead += bytesRead;
+      }
+
+      readChannel.close();
+
+      if (totalBytesRead == fileSize) {
+        // Mark the file as cached
+        isFileCached = true;
+
+        logger.atFiner().log(
+            "Successfully cached entire file content for '%s' (%d bytes)",
+            resourceId, fileSize);
+      } else {
+        // If we couldn't read the entire file, don't use the cache
+        cachedContent = null;
+        isFileCached = false;
+
+        logger.atWarning().log(
+            "Failed to cache entire file for '%s': read %d bytes out of %d",
+            resourceId, totalBytesRead, fileSize);
+      }
+    } catch (IOException e) {
+      GoogleCloudStorageEventBus.postOnException();
+      cachedContent = null;
+      isFileCached = false;
+      logger.atWarning().withCause(e).log(
+          "Failed to cache entire file for '%s'", resourceId);
+    }
   }
 
   @Override
@@ -113,6 +182,19 @@ class GoogleCloudStorageClientReadChannel implements SeekableByteChannel {
     if (currentPosition == objectSize) {
       return -1;
     }
+
+    // If the file is cached, read from the cache
+    if (isFileCached && cachedContent != null) {
+      int bytesToRead = Math.min(dst.remaining(), (int)(objectSize - currentPosition));
+      if (bytesToRead > 0) {
+        dst.put(cachedContent, (int)currentPosition, bytesToRead);
+        currentPosition += bytesToRead;
+        return bytesToRead;
+      } else {
+        return -1;
+      }
+    }
+
     return contentReadChannel.readContent(dst);
   }
 
@@ -150,6 +232,11 @@ class GoogleCloudStorageClientReadChannel implements SeekableByteChannel {
     logger.atFiner().log(
         "Seek from %s to %s position for '%s'", currentPosition, newPosition, resourceId);
     currentPosition = newPosition;
+
+    // For cached files, we don't need to do anything else since we read directly from the cache
+    // in the read() method. For non-cached files, the actual seek will be performed lazily
+    // when read() is called.
+
     return this;
   }
 
@@ -613,6 +700,21 @@ class GoogleCloudStorageClientReadChannel implements SeekableByteChannel {
       default:
         return new IOException(msg, error);
     }
+  }
+
+  private BlobSourceOption[] generateReadOptions(BlobId blobId) {
+    List<BlobSourceOption> blobReadOptions = new ArrayList<>();
+    // To get decoded content
+    blobReadOptions.add(BlobSourceOption.shouldReturnRawInputStream(false));
+
+    if (blobId.getGeneration() != null) {
+      blobReadOptions.add(BlobSourceOption.generationMatch(blobId.getGeneration()));
+    }
+    if (storageOptions.getEncryptionKey() != null) {
+      blobReadOptions.add(
+          BlobSourceOption.decryptionKey(storageOptions.getEncryptionKey().value()));
+    }
+    return blobReadOptions.toArray(new BlobSourceOption[blobReadOptions.size()]);
   }
 
   /** Validates that the given position is valid for this channel. */

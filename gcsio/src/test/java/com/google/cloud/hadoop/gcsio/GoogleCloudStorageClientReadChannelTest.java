@@ -537,4 +537,79 @@ public class GoogleCloudStorageClientReadChannelTest {
         GrpcErrorTypeExtractor.INSTANCE,
         GoogleCloudStorageOptions.DEFAULT.toBuilder().build());
   }
+
+  @Test
+  public void testSmallFileCaching() throws IOException {
+    // Create a small file (2MB)
+    ByteString smallContent = GoogleCloudStorageTestHelper.createTestData(2 * 1024 * 1024);
+    ReadChannel smallFileChannel = spy(new FakeReadChannel(smallContent));
+    when(mockedStorage.reader(any(), any())).thenReturn(smallFileChannel);
+
+    GoogleCloudStorageItemInfo smallFileInfo = GoogleCloudStorageItemInfo.createObject(
+        RESOURCE_ID,
+        /* creationTime= */ 10L,
+        /* modificationTime= */ 15L,
+        /* size= */ smallContent.size(),
+        /* contentType= */ "text/plain",
+        /* contentEncoding= */ "text",
+        /* metadata= */ null,
+        /* contentGeneration= */ 1,
+        /* metaGeneration= */ 2L,
+        /* verificationAttributes= */ null);
+
+    GoogleCloudStorageReadOptions options = GoogleCloudStorageReadOptions.builder()
+        .setSmallFileCacheEnabled(true)
+        .setSmallFileCacheMaxSize(3 * 1024 * 1024) // 3MB max cache size
+        .build();
+
+    GoogleCloudStorageClientReadChannel readChannel = getJavaStorageChannel(smallFileInfo, options);
+
+    // First read should trigger caching of the entire file
+    ByteBuffer buffer = ByteBuffer.allocate(1024);
+    readChannel.position(0);
+    readChannel.read(buffer);
+
+    // Verify the content of the first read
+    buffer.flip();
+    byte[] expectedData = smallContent.substring(0, buffer.limit()).toByteArray();
+    byte[] actualData = new byte[buffer.limit()];
+    System.arraycopy(buffer.array(), 0, actualData, 0, buffer.limit());
+    assertByteArrayEquals(expectedData, actualData);
+
+    // Reset the buffer
+    buffer.clear();
+
+    // Read from a different position should not trigger another request
+    int secondPosition = 1024 * 1024; // 1MB offset
+    readChannel.position(secondPosition);
+    readChannel.read(buffer);
+
+    // Verify the content of the second read
+    buffer.flip();
+    byte[] expectedData2 = smallContent.substring(secondPosition, secondPosition + buffer.limit()).toByteArray();
+    byte[] actualData2 = new byte[buffer.limit()];
+    System.arraycopy(buffer.array(), 0, actualData2, 0, buffer.limit());
+    assertByteArrayEquals(expectedData2, actualData2);
+
+    // Reset the buffer
+    buffer.clear();
+
+    // Read another section
+    int thirdPosition = 1024 * 1024 + 512; // 1MB + 512 bytes offset
+    readChannel.position(thirdPosition);
+    readChannel.read(buffer);
+
+    // Verify the content of the third read
+    buffer.flip();
+    byte[] expectedData3 = smallContent.substring(thirdPosition, thirdPosition + buffer.limit()).toByteArray();
+    byte[] actualData3 = new byte[buffer.limit()];
+    System.arraycopy(buffer.array(), 0, actualData3, 0, buffer.limit());
+    assertByteArrayEquals(expectedData3, actualData3);
+
+    // Verify that we only created one channel and read the entire file once
+    verify(smallFileChannel, times(1)).read(any(ByteBuffer.class));
+
+    // Close the channel
+    readChannel.close();
+  }
 }

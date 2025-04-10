@@ -54,7 +54,9 @@ public abstract class GoogleCloudStorageReadOptions {
         .setGrpcReadZeroCopyEnabled(true)
         .setGzipEncodingSupportEnabled(false)
         .setInplaceSeekLimit(8 * 1024 * 1024)
-        .setMinRangeRequestSize(2 * 1024 * 1024);
+        .setMinRangeRequestSize(2 * 1024 * 1024)
+        .setSmallFileCacheEnabled(false)
+        .setSmallFileCacheMaxSize(3 * 1024 * 1024);
   }
 
   public abstract Builder toBuilder();
@@ -100,6 +102,12 @@ public abstract class GoogleCloudStorageReadOptions {
 
   /** See {@link Builder#setGrpcReadTimeout(Duration)}. */
   public abstract Duration getGrpcReadMessageTimeout();
+
+  /** See {@link Builder#setSmallFileCacheEnabled}. */
+  public abstract boolean isSmallFileCacheEnabled();
+
+  /** See {@link Builder#setSmallFileCacheMaxSize}. */
+  public abstract long getSmallFileCacheMaxSize();
 
   /** Mutable builder for GoogleCloudStorageReadOptions. */
   @AutoValue.Builder
@@ -199,6 +207,19 @@ public abstract class GoogleCloudStorageReadOptions {
     /** Sets the property for gRPC read message timeout in milliseconds. */
     public abstract Builder setGrpcReadMessageTimeout(Duration grpcMessageTimeout);
 
+    /**
+     * Sets whether to enable small file caching. When enabled, files smaller than
+     * smallFileCacheMaxSize will be fully fetched and cached in memory, even when
+     * only a portion of the file is requested.
+     */
+    public abstract Builder setSmallFileCacheEnabled(boolean smallFileCacheEnabled);
+
+    /**
+     * Sets the maximum size in bytes of files that will be cached entirely.
+     * Files larger than this size will not be cached, even if caching is enabled.
+     */
+    public abstract Builder setSmallFileCacheMaxSize(long smallFileCacheMaxSize);
+
     abstract GoogleCloudStorageReadOptions autoBuild();
 
     public GoogleCloudStorageReadOptions build() {
@@ -207,6 +228,10 @@ public abstract class GoogleCloudStorageReadOptions {
           options.getInplaceSeekLimit() >= 0,
           "inplaceSeekLimit must be non-negative! Got %s",
           options.getInplaceSeekLimit());
+      checkState(
+          options.getSmallFileCacheMaxSize() >= 0,
+          "smallFileCacheMaxSize must be non-negative! Got %s",
+          options.getSmallFileCacheMaxSize());
       return options;
     }
   }

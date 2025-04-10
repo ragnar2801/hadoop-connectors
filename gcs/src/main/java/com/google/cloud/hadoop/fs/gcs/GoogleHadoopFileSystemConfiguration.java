@@ -455,6 +455,21 @@ public class GoogleHadoopFileSystemConfiguration {
           "fs.gs.grpc.trafficdirector.enable",
           GoogleCloudStorageOptions.DEFAULT.isTrafficDirectorEnabled());
 
+  /**
+   * Configuration key for enabling small file caching. When enabled, files smaller than
+   * fs.gs.small.file.cache.max.size will be fully fetched and cached in memory, even when
+   * only a portion of the file is requested.
+   */
+  public static final HadoopConfigurationProperty<Boolean> GCS_SMALL_FILE_CACHE_ENABLE =
+      new HadoopConfigurationProperty<>("fs.gs.small.file.cache.enable", false);
+
+  /**
+   * Configuration key for the maximum size in bytes of files that will be cached entirely.
+   * Files larger than this size will not be cached, even if caching is enabled.
+   */
+  public static final HadoopConfigurationProperty<Long> GCS_SMALL_FILE_CACHE_MAX_SIZE =
+      new HadoopConfigurationProperty<>("fs.gs.small.file.cache.max.size", 3 * 1024 * 1024L);
+
   /** Configuration key for the headers for HTTP request to GCS. */
   public static final HadoopConfigurationProperty<Map<String, String>> GCS_HTTP_HEADERS =
       new HadoopConfigurationProperty<>(
@@ -650,6 +665,8 @@ public class GoogleHadoopFileSystemConfiguration {
         .setInplaceSeekLimit(GCS_INPUT_STREAM_INPLACE_SEEK_LIMIT.get(config, config::getLongBytes))
         .setMinRangeRequestSize(
             GCS_INPUT_STREAM_MIN_RANGE_REQUEST_SIZE.get(config, config::getLongBytes))
+        .setSmallFileCacheEnabled(GCS_SMALL_FILE_CACHE_ENABLE.get(config, config::getBoolean))
+        .setSmallFileCacheMaxSize(GCS_SMALL_FILE_CACHE_MAX_SIZE.get(config, config::getLongBytes))
         .build();
   }
 
